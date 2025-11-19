@@ -95,3 +95,126 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import json
+import pickle
+import gzip
+from pathlib import Path
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix
+)
+
+
+def limpiar_datos(df):
+    df = df.copy()
+    df = df.rename(columns={"default payment next month": "default"})
+    df = df.drop(columns=["ID"])
+    df = df[(df["MARRIAGE"] != 0) & (df["EDUCATION"] != 0)]
+    df.loc[df["EDUCATION"] > 4, "EDUCATION"] = 4
+    df = df.dropna()
+    return df
+
+
+def crear_modelo():
+    cat_cols = ["SEX", "EDUCATION", "MARRIAGE"]
+    num_cols = ["LIMIT_BAL", "AGE", "PAY_0", "PAY_2", "PAY_3", "PAY_4", "PAY_5", "PAY_6",
+                "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6",
+                "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"]
+    
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
+            ("num", MinMaxScaler(), num_cols)
+        ]
+    )
+    
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("selector", SelectKBest(f_classif)),
+        ("classifier", LogisticRegression(random_state=42, max_iter=1000, solver="saga"))
+    ])
+    
+    params = {
+        "selector__k": list(range(1, 11)),
+        "classifier__C": [0.001, 0.01, 0.1, 1, 10, 100],
+        "classifier__penalty": ["l1", "l2"]
+    }
+    
+    grid = GridSearchCV(
+        pipeline,
+        params,
+        cv=10,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        refit=True
+    )
+    
+    return grid
+
+
+def calcular_metricas(nombre, y_real, y_pred):
+    return {
+        "type": "metrics",
+        "dataset": nombre,
+        "precision": precision_score(y_real, y_pred, zero_division=0),
+        "balanced_accuracy": balanced_accuracy_score(y_real, y_pred),
+        "recall": recall_score(y_real, y_pred, zero_division=0),
+        "f1_score": f1_score(y_real, y_pred, zero_division=0)
+    }
+
+
+def calcular_matriz(nombre, y_real, y_pred):
+    cm = confusion_matrix(y_real, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": nombre,
+        "true_0": {"predicted_0": int(cm[0][0]), "predicted_1": int(cm[0][1])},
+        "true_1": {"predicted_0": int(cm[1][0]), "predicted_1": int(cm[1][1])}
+    }
+
+
+if __name__ == "__main__":
+    
+    train_df = pd.read_csv("files/input/train_data.csv.zip", compression="zip")
+    test_df = pd.read_csv("files/input/test_data.csv.zip", compression="zip")
+    
+    train_df = limpiar_datos(train_df)
+    test_df = limpiar_datos(test_df)
+    
+    X_train = train_df.drop(columns=["default"])
+    y_train = train_df["default"]
+    X_test = test_df.drop(columns=["default"])
+    y_test = test_df["default"]
+    
+    modelo = crear_modelo()
+    modelo.fit(X_train, y_train)
+    
+    Path("files/models").mkdir(parents=True, exist_ok=True)
+    with gzip.open("files/models/model.pkl.gz", "wb") as f:
+        pickle.dump(modelo, f)
+    
+    y_pred_train = modelo.predict(X_train)
+    y_pred_test = modelo.predict(X_test)
+    
+    metricas_train = calcular_metricas("train", y_train, y_pred_train)
+    metricas_test = calcular_metricas("test", y_test, y_pred_test)
+    matriz_train = calcular_matriz("train", y_train, y_pred_train)
+    matriz_test = calcular_matriz("test", y_test, y_pred_test)
+    
+    Path("files/output").mkdir(parents=True, exist_ok=True)
+    with open("files/output/metrics.json", "w") as f:
+        f.write(json.dumps(metricas_train) + "\n")
+        f.write(json.dumps(metricas_test) + "\n")
+        f.write(json.dumps(matriz_train) + "\n")
+        f.write(json.dumps(matriz_test) + "\n")
